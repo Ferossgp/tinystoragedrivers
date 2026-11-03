@@ -308,6 +308,7 @@ impl EncryptedFileSecrets {
 
 /// The cleanup quarantine for one import: scoped by its name and by the exact
 /// source object, so imports that share a source directory never share one.
+#[cfg(any(unix, test))]
 fn quarantine_name(intent: &Intent) -> PathBuf {
     let scope = format!(
         "{}:{}:{}",
