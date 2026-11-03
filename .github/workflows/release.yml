@@ -28,7 +28,7 @@ env:
 jobs:
   prepare:
     name: Prepare release
-    if: ${{ (github.repository == 'tinyhumansai/tinystoragedrivers' && github.ref == 'refs/heads/main') || (github.repository == 'senamakel/tinystoragedrivers' && github.ref == 'refs/heads/epic/8131-storage-primitives') || (github.repository == 'senamakel/tinystoragedrivers' && github.ref == 'refs/heads/epic/8369-security-migration') }}
+    if: ${{ github.repository == 'tinyhumansai/tinystoragedrivers' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -216,7 +216,7 @@ jobs:
   github-release:
     name: Create GitHub release
     needs: prepare
-    if: ${{ (github.repository == 'tinyhumansai/tinystoragedrivers' && github.ref == 'refs/heads/main') || (github.repository == 'senamakel/tinystoragedrivers' && github.ref == 'refs/heads/epic/8131-storage-primitives') || (github.repository == 'senamakel/tinystoragedrivers' && github.ref == 'refs/heads/epic/8369-security-migration') }}
+    if: ${{ github.repository == 'tinyhumansai/tinystoragedrivers' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

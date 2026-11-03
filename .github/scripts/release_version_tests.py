@@ -180,31 +180,14 @@ class ReleaseLocks(unittest.TestCase):
 
 
 class ReleaseWorkflowRefs(unittest.TestCase):
-    def test_release_jobs_allow_canonical_main_and_exact_fork_epics(self):
+    def test_release_jobs_run_only_on_canonical_main(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
-        legacy_condition = ("(github.repository == 'tinyhumansai/tinystoragedrivers' && "
-                           "github.ref == 'refs/heads/main') || "
-                           "(github.repository == 'senamakel/tinystoragedrivers' && "
-                           "github.ref == 'refs/heads/epic/8131-storage-primitives')")
-        migration_condition = (legacy_condition + " || "
-                               "(github.repository == 'senamakel/tinystoragedrivers' && "
-                               "github.ref == 'refs/heads/epic/8369-security-migration')")
-        self.assertEqual(workflow.count(migration_condition), 2)
-
-        def allowed(repository, ref):
-            return (repository, ref) in {
-                ("tinyhumansai/tinystoragedrivers", "refs/heads/main"),
-                ("senamakel/tinystoragedrivers", "refs/heads/epic/8131-storage-primitives"),
-                ("senamakel/tinystoragedrivers", "refs/heads/epic/8369-security-migration"),
-            }
-
-        self.assertTrue(allowed("tinyhumansai/tinystoragedrivers", "refs/heads/main"))
-        self.assertTrue(allowed("senamakel/tinystoragedrivers",
-                                "refs/heads/epic/8131-storage-primitives"))
-        self.assertTrue(allowed("senamakel/tinystoragedrivers",
-                                "refs/heads/epic/8369-security-migration"))
-        self.assertFalse(allowed("senamakel/tinystoragedrivers", "refs/heads/main"))
-        self.assertFalse(allowed("tinyhumansai/tinystoragedrivers", "refs/heads/feature"))
+        condition = ("if: ${{ github.repository == 'tinyhumansai/tinystoragedrivers' && "
+                     "github.ref == 'refs/heads/main' }}")
+        job_conditions = [line for line in workflow.splitlines() if line.startswith("    if: ")]
+        self.assertEqual(job_conditions, ["    " + condition] * 2)
+        self.assertNotIn("senamakel/", workflow)
+        self.assertNotIn("refs/heads/epic/", workflow)
 
     def test_release_uploads_a_hashed_source_archive_and_checksum(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
