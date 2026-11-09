@@ -136,7 +136,10 @@ fn database_parent_creation_errors_are_backend_errors() {
 fn runtime_free_task_panics_are_mapped_and_default_open_uses_a_directory() {
     let directory = tempfile::tempdir().unwrap();
     let connection = SqliteConnection::open(directory.path()).unwrap();
-    assert_eq!(connection.path(), directory.path().join("storage.db"));
+    assert_eq!(
+        connection.path().canonicalize().unwrap(),
+        directory.path().join("storage.db").canonicalize().unwrap()
+    );
     assert!((connection.clock())() > 0);
 
     let db = Db::open(&directory.path().join("panic.db")).unwrap();
