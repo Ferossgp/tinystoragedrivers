@@ -40,7 +40,7 @@ impl SqliteConnection {
     /// # Errors
     /// Returns a path, SQLite, or incompatible-schema error.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::open_with_clock(path, Arc::new(system_clock))
+        Self::open_with_clock(path, Arc::new(crate::system_clock))
     }
 
     /// Open storage while using `clock` for document and blob expiries and
@@ -49,6 +49,18 @@ impl SqliteConnection {
     /// # Errors
     /// Returns a path, SQLite, or incompatible-schema error.
     pub fn open_with_clock(path: impl AsRef<Path>, clock: Clock) -> Result<Self> {
+        Self::open_prefixed(path, "", clock)
+    }
+
+    /// Open storage whose table names all start with `table_prefix`, so the
+    /// driver's tables can share a database file with tables it does not own.
+    /// An empty prefix gives the default names.
+    ///
+    /// # Errors
+    /// Returns invalid input for a prefix other than at most 64 ASCII
+    /// letters, digits and underscores; otherwise as [`Self::open`].
+    pub fn open_prefixed(path: impl AsRef<Path>, table_prefix: &str, clock: Clock) -> Result<Self> {
+        let tables = Arc::new(SqliteTables::with_prefix(table_prefix)?);
         let path = path.as_ref();
         let file = if is_file_path(path) {
             path.to_path_buf()
@@ -56,7 +68,6 @@ impl SqliteConnection {
             path.join("storage.db")
         };
         let db = Db::open(&file)?;
-        let tables = Arc::new(SqliteTables::new());
         let tables_for_ensure = Arc::clone(&tables);
         db.run_now(move |conn| tables_for_ensure.ensure(conn))?;
         Ok(Self { db, tables, clock })
@@ -102,14 +113,6 @@ impl SqliteConnection {
     pub fn run_now<T>(&self, operation: impl FnOnce(&mut Connection) -> Result<T>) -> Result<T> {
         self.db.run_now(operation)
     }
-}
-
-fn system_clock() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| {
-            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
-        })
 }
 
 fn is_file_path(path: &Path) -> bool {

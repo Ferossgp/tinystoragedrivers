@@ -5,7 +5,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::Value;
 use tinystoragedrivers_api::KvStore;
-use tinystoragedrivers_connect::sqlite::{SqliteConnection, rusqlite};
+use tinystoragedrivers_connect::sqlite::{SqliteConnection, SqliteTables, rusqlite};
 use tinystoragedrivers_types::{
     Capabilities, Capability, Cursor, Meta, Page, Precondition, Result, Scope, StorageError,
     Version, Versioned, WriteCondition,
@@ -16,7 +16,10 @@ use crate::common::{
     validate_key, validate_limit, validate_prefix, version_to_i64,
 };
 
-const TABLE: &str = "_tsd_kv";
+/// The quoted name of the KV table.
+fn table(tables: &SqliteTables) -> String {
+    format!("\"{}\"", tables.kv())
+}
 
 #[derive(Debug)]
 struct Record {
@@ -42,20 +45,10 @@ impl SqliteKv {
     #[allow(clippy::needless_pass_by_value)]
     pub fn new(connection: SqliteConnection, scope: Scope) -> Result<Self> {
         connection.run_now(|conn| {
-            conn.execute_batch(&format!(
-                "CREATE TABLE IF NOT EXISTS {TABLE} (
-                    scope TEXT NOT NULL,
-                    key TEXT NOT NULL,
-                    version INTEGER NOT NULL,
-                    expires_ms INTEGER,
-                    deleted INTEGER NOT NULL DEFAULT 0,
-                    value TEXT,
-                    PRIMARY KEY (scope, key)
-                ) WITHOUT ROWID"
-            ))
-            .map_err(tinystoragedrivers_connect::sqlite::error::during(
-                "create KV table",
-            ))
+            conn.execute_batch(&connection.tables().kv_declaration())
+                .map_err(tinystoragedrivers_connect::sqlite::error::during(
+                    "create KV table",
+                ))
         })?;
         Ok(Self {
             connection,
@@ -111,9 +104,10 @@ impl KvStore for SqliteKv {
         let scope = self.scope.clone();
         let key = key.to_owned();
         let now = self.now_ms();
+        let table = table(self.connection.tables());
         connection
             .run(move |conn| {
-                let record = read_record(conn, &scope, &key)?;
+                let record = read_record(conn, &table, &scope, &key)?;
                 Ok(record.filter(|record| record.live(now)).and_then(|record| {
                     record.value.map(|value| Versioned {
                         id: key,
@@ -151,7 +145,8 @@ impl KvStore for SqliteKv {
                 if let Some(condition) = &condition {
                     tables.check_write_condition(&tx, condition, now)?;
                 }
-                let old = read_record(&tx, &scope, &key)?;
+                let table = table(&tables);
+                let old = read_record(&tx, &table, &scope, &key)?;
                 let current = old.as_ref().filter(|record| record.live(now)).map(|r| r.version);
                 check_precondition(expected, current)?;
                 let Some(current) = current else {
@@ -159,7 +154,7 @@ impl KvStore for SqliteKv {
                 };
                 let version = version_to_i64(next_version(Some(current))?)?;
                 tx.execute(
-                    &format!("UPDATE {TABLE} SET version=?3, expires_ms=NULL, deleted=1, value=NULL WHERE scope=?1 AND key=?2"),
+                    &format!("UPDATE {table} SET version=?3, expires_ms=NULL, deleted=1, value=NULL WHERE scope=?1 AND key=?2"),
                     rusqlite::params![scope, key, version],
                 )
                 .map_err(tinystoragedrivers_connect::sqlite::error::during("delete a KV value"))?;
@@ -186,10 +181,11 @@ impl KvStore for SqliteKv {
         let scope = self.scope.clone();
         let prefix = prefix.to_owned();
         let now = self.now_ms();
+        let table = table(self.connection.tables());
         connection
             .run(move |conn| {
                 let mut statement = conn
-                    .prepare(&format!("SELECT key, version, expires_ms, deleted, value FROM {TABLE} WHERE scope=?1 AND key>=?2 ORDER BY key"))
+                    .prepare(&format!("SELECT key, version, expires_ms, deleted, value FROM {table} WHERE scope=?1 AND key>=?2 ORDER BY key"))
                     .map_err(tinystoragedrivers_connect::sqlite::error::during("prepare KV listing"))?;
                 let rows = statement
                     .query_map(rusqlite::params![scope, prefix], |row| {
@@ -275,12 +271,13 @@ impl SqliteKv {
                 if let Some(condition) = &condition {
                     tables.check_write_condition(&tx, condition, now)?;
                 }
-                let old = read_record(&tx, &scope, &key)?;
+                let table = table(&tables);
+                let old = read_record(&tx, &table, &scope, &key)?;
                 let current = old.as_ref().filter(|record| record.live(now)).map(|r| r.version);
                 check_precondition(expected, current)?;
                 let version = version_to_i64(next_version(old.map(|record| record.version))?)?;
                 tx.execute(
-                    &format!("INSERT INTO {TABLE}(scope,key,version,expires_ms,deleted,value) VALUES (?1,?2,?3,?4,0,?5) ON CONFLICT(scope,key) DO UPDATE SET version=excluded.version, expires_ms=excluded.expires_ms, deleted=0, value=excluded.value"),
+                    &format!("INSERT INTO {table}(scope,key,version,expires_ms,deleted,value) VALUES (?1,?2,?3,?4,0,?5) ON CONFLICT(scope,key) DO UPDATE SET version=excluded.version, expires_ms=excluded.expires_ms, deleted=0, value=excluded.value"),
                     rusqlite::params![scope, key, version, expires_ms, encoded],
                 )
                 .map_err(tinystoragedrivers_connect::sqlite::error::during("write a KV value"))?;
@@ -300,11 +297,16 @@ impl Record {
     }
 }
 
-fn read_record(conn: &rusqlite::Connection, scope: &str, key: &str) -> Result<Option<Record>> {
+fn read_record(
+    conn: &rusqlite::Connection,
+    table: &str,
+    scope: &str,
+    key: &str,
+) -> Result<Option<Record>> {
     use rusqlite::OptionalExtension;
     conn.query_row(
         &format!(
-            "SELECT version, expires_ms, deleted, value FROM {TABLE} WHERE scope=?1 AND key=?2"
+            "SELECT version, expires_ms, deleted, value FROM {table} WHERE scope=?1 AND key=?2"
         ),
         rusqlite::params![scope, key],
         |row| {
