@@ -16,6 +16,7 @@
 mod batch;
 pub mod error;
 mod schema;
+mod transport;
 mod tx;
 
 use std::collections::HashMap;
@@ -51,7 +52,10 @@ pub async fn connect(url: &str, auth_token: &str) -> libsql::Result<libsql::Conn
         return Ok(conn);
     }
     if is_remote(url) {
+        let connector = transport::Connector::new()
+            .map_err(|error| libsql::Error::ConnectionFailed(error.to_string()))?;
         return libsql::Builder::new_remote(url.to_owned(), auth_token.to_owned())
+            .connector(connector)
             .build()
             .await?
             .connect();
@@ -136,10 +140,22 @@ impl LibsqlConnection {
         })
     }
 
-    /// Exclusive use of the connection until the guard drops. Hold it only
-    /// while statements run.
+    /// Exclusive use of the connection, outside any transaction, until the
+    /// guard drops. Hold it only while statements run. A caller cancelled
+    /// inside a [`Tx`] leaves its transaction open; the next caller rolls it
+    /// back first (a connection that cannot roll back drops its server
+    /// stream, which the server rolls back).
     pub async fn lock(&self) -> tokio::sync::MutexGuard<'_, libsql::Connection> {
-        self.inner.conn.lock().await
+        let conn = self.inner.conn.lock().await;
+        if !conn.is_autocommit() {
+            let rolled_back = tokio::time::timeout(BUSY_TIMEOUT, conn.execute("ROLLBACK", ()))
+                .await
+                .is_ok_and(|result| result.is_ok());
+            if !rolled_back {
+                conn.reset().await;
+            }
+        }
+        conn
     }
 
     /// Return the injected clock shared by all primitive adapters.

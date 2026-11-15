@@ -241,10 +241,13 @@ impl<'a> Tx<'a> {
         let mut sql = String::new();
         let mut skipped = 0;
         let mut guards = Vec::new();
+        // The condition is checked once, in the request that opens the
+        // transaction; later reads see the same locked state.
+        let judged = if self.begun { None } else { self.condition };
         if !self.begun {
             sql.push_str("BEGIN IMMEDIATE;\n");
             skipped += 1;
-            if let Some((tables, condition, _)) = self.condition {
+            if let Some((tables, condition, _)) = judged {
                 guards = condition_reads(tables, condition).map_err(during(operation))?;
             }
         }
@@ -265,7 +268,7 @@ impl<'a> Tx<'a> {
         let mut sets = expect_sets(sets, skipped + guards.len() + reads.len())?;
         let mut answers = sets.split_off(skipped);
         let rest = answers.split_off(guards.len());
-        if let Some((_, condition, now_ms)) = self.condition {
+        if let Some((_, condition, now_ms)) = judged {
             judge(condition, answers, now_ms)?;
         }
         Ok(rest)

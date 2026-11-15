@@ -11,7 +11,7 @@ publish = false
 [features]
 default = []
 sqlite = ["dep:rusqlite", "dep:tokio", "dep:zstd", "dep:serde_json"]
-libsql = ["dep:libsql", "dep:tokio", "tokio/time", "tokio/sync", "dep:zstd", "dep:serde_json"]
+libsql = ["dep:libsql", "dep:tokio", "tokio/time", "tokio/sync", "tokio/net", "dep:zstd", "dep:serde_json", "dep:hyper", "dep:http", "dep:tower-service", "dep:rustls", "dep:tokio-rustls", "dep:webpki-roots"]
 mongodb = ["dep:mongodb"]
 s3 = ["dep:object_store", "dep:url"]
 amqp = ["dep:lapin"]
@@ -20,7 +20,15 @@ file = ["dep:tokio"]
 [dependencies]
 tinystoragedrivers-types = { workspace = true }
 rusqlite = { version = "0.41.0", features = ["bundled"], optional = true }
-libsql = { version = "0.10.0", default-features = false, features = ["core", "remote", "tls"], optional = true }
+libsql = { version = "0.10.0", default-features = false, features = ["core", "remote"], optional = true }
+# The remote transport (libsql/transport.rs): libSQL's `Builder::connector`
+# takes a hyper 0.14 / tower connection service over a verified rustls 0.23 stream.
+hyper = { version = "0.14", default-features = false, features = ["client"], optional = true }
+http = { version = "0.2", optional = true }
+tower-service = { version = "0.3", optional = true }
+rustls = { version = "0.23.31", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"], optional = true }
+webpki-roots = { version = "1", optional = true }
 zstd = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt"], optional = true }
