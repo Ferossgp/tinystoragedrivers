@@ -47,6 +47,18 @@ pub enum StorageConfig {
         /// Root directory.
         dir: PathBuf,
     },
+    /// libSQL: a remote database (`libsql://`, `https://`, `http://`) or a
+    /// local `file:<path>`, one database shared by every scope. Display and
+    /// `Debug` never show the token.
+    Libsql {
+        /// The database URL, without the token.
+        url: String,
+        /// The bearer token of a remote database; empty for none.
+        auth_token: String,
+        /// Prepended to every table name, so the driver's tables can share a
+        /// database with tables it does not own; empty for none.
+        table_prefix: String,
+    },
 }
 
 impl StorageConfig {
@@ -54,8 +66,11 @@ impl StorageConfig {
     ///
     /// Accepted forms: `memory`; `sqlite:<path>`; a bare path (absolute, or
     /// starting with `./` or `../`), read as SQLite;
-    /// `mongodb://…/<database>` and `mongodb+srv://…/<database>`; and
-    /// `file:<dir>`.
+    /// `mongodb://…/<database>` and `mongodb+srv://…/<database>`;
+    /// `file:<dir>`; and `libsql://…`, `https://…` or `http://…` with the
+    /// optional query parameters `authToken` and `tablePrefix`. A local
+    /// libSQL file is configured with [`StorageConfig::Libsql`] directly,
+    /// because `file:` already names the file driver.
     ///
     /// # Errors
     ///
@@ -73,6 +88,12 @@ impl StorageConfig {
         if url.starts_with("mongodb://") || url.starts_with("mongodb+srv://") {
             return Self::parse_mongo(url);
         }
+        if ["libsql://", "https://", "http://"]
+            .iter()
+            .any(|scheme| url.starts_with(scheme))
+        {
+            return Self::parse_libsql(url);
+        }
         if let Some(path) = url.strip_prefix("sqlite:") {
             return Ok(Self::Sqlite {
                 path: non_empty_path(path.strip_prefix("//").unwrap_or(path), "sqlite")?,
@@ -89,7 +110,7 @@ impl StorageConfig {
             });
         }
         Err(StorageError::invalid_input(format!(
-            "unrecognized storage URL `{}`; expected memory, sqlite:<path>, mongodb://…/<db> or file:<dir>",
+            "unrecognized storage URL `{}`; expected memory, sqlite:<path>, mongodb://…/<db>, libsql://… or file:<dir>",
             redact_url(url)
         )))
     }
@@ -109,6 +130,40 @@ impl StorageConfig {
         })
     }
 
+    /// Split the driver's own query parameters off a libSQL URL; the rest of
+    /// the query stays with the URL.
+    fn parse_libsql(url: &str) -> Result<Self> {
+        let (base, query) = url.split_once('?').unwrap_or((url, ""));
+        if base
+            .split_once("://")
+            .is_none_or(|(_, host)| host.is_empty())
+        {
+            return Err(StorageError::invalid_input(format!(
+                "libSQL URL `{}` names no host",
+                redact_url(url)
+            )));
+        }
+        let (mut auth_token, mut table_prefix) = (String::new(), String::new());
+        let mut kept = Vec::new();
+        for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+            match pair.split_once('=') {
+                Some(("authToken", value)) => value.clone_into(&mut auth_token),
+                Some(("tablePrefix", value)) => value.clone_into(&mut table_prefix),
+                _ => kept.push(pair),
+            }
+        }
+        let url = if kept.is_empty() {
+            base.to_owned()
+        } else {
+            format!("{base}?{}", kept.join("&"))
+        };
+        Ok(Self::Libsql {
+            url,
+            auth_token,
+            table_prefix,
+        })
+    }
+
     /// The driver this configuration selects.
     #[must_use]
     pub fn driver(&self) -> &'static str {
@@ -117,6 +172,7 @@ impl StorageConfig {
             Self::Sqlite { .. } => "sqlite",
             Self::MongoDb { .. } => "mongodb",
             Self::File { .. } => "file",
+            Self::Libsql { .. } => "libsql",
         }
     }
 }
@@ -153,11 +209,12 @@ fn split_uri(url: &str) -> Option<UriParts<'_>> {
 
 /// Query options whose values are credentials (AWS session tokens ride in
 /// `authMechanismProperties`).
-const SECRET_OPTIONS: [&str; 4] = [
+const SECRET_OPTIONS: [&str; 5] = [
     "authmechanismproperties",
     "proxypassword",
     "tlscertificatekeyfilepassword",
     "password",
+    "authtoken",
 ];
 
 /// Hide credentials in a storage connection URI before displaying it.
@@ -333,6 +390,17 @@ impl fmt::Display for StorageConfig {
             Self::Sqlite { path } => write!(f, "sqlite:{}", path.display()),
             Self::MongoDb { uri, .. } => f.write_str(&redact_url(uri)),
             Self::File { dir } => write!(f, "file:{}", dir.display()),
+            Self::Libsql {
+                url, table_prefix, ..
+            } => {
+                f.write_str(&redact_url(url))?;
+                if table_prefix.is_empty() {
+                    Ok(())
+                } else {
+                    let separator = if url.contains('?') { '&' } else { '?' };
+                    write!(f, "{separator}tablePrefix={table_prefix}")
+                }
+            }
         }
     }
 }
@@ -367,6 +435,15 @@ pub async fn open(config: &StorageConfig) -> Result<Arc<dyn StorageBackend>> {
         StorageConfig::Sqlite { path } => {
             Engine::Sqlite(tinystoragedrivers_connect::SqliteConnection::open(path)?)
         }
+        #[cfg(feature = "libsql")]
+        StorageConfig::Libsql {
+            url,
+            auth_token,
+            table_prefix,
+        } => Engine::Libsql(
+            tinystoragedrivers_connect::LibsqlConnection::open(url, auth_token, table_prefix)
+                .await?,
+        ),
         #[cfg(feature = "mongodb")]
         StorageConfig::MongoDb { uri, database } => {
             let connection =
@@ -398,6 +475,8 @@ enum Engine {
     File(tinystoragedrivers_connect::FileConnection),
     #[cfg(feature = "sqlite")]
     Sqlite(tinystoragedrivers_connect::SqliteConnection),
+    #[cfg(feature = "libsql")]
+    Libsql(tinystoragedrivers_connect::LibsqlConnection),
     #[cfg(feature = "mongodb")]
     Mongo {
         connection: tinystoragedrivers_connect::MongoConnection,
@@ -425,6 +504,10 @@ impl CompositeBackend {
             clippy::unnecessary_wraps,
             reason = "engine-enabled builds can fail while opening a scope; keep one backend contract across feature sets"
         )
+    )]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one arm per engine feature; each arm only wires that engine's ports"
     )]
     fn open_scope(&self, scope: &tinystoragedrivers_types::Scope) -> Result<Storage> {
         use std::sync::Arc;
@@ -492,6 +575,28 @@ impl CompositeBackend {
                     as Arc<dyn tinystoragedrivers_api::QueueStore>;
                 (docs, streams, kv, blobs, queues, unsupported_secrets())
             }
+            #[cfg(feature = "libsql")]
+            Engine::Libsql(connection) => {
+                let docs = Arc::new(tinystoragedrivers_document::libsql::LibsqlDocuments::new(
+                    connection.clone(),
+                    scope.clone(),
+                )) as Arc<dyn tinystoragedrivers_api::DocumentStore>;
+                let streams = Arc::new(tinystoragedrivers_document::libsql::LibsqlStreams::new(
+                    connection.clone(),
+                    scope.clone(),
+                )) as Arc<dyn tinystoragedrivers_api::StreamStore>;
+                let kv = Arc::new(tinystoragedrivers_kv::LibsqlKv::new(
+                    connection.clone(),
+                    scope.clone(),
+                )) as Arc<dyn tinystoragedrivers_api::KvStore>;
+                let blobs = Arc::new(tinystoragedrivers_blob::LibsqlBlobStore::new(
+                    connection.clone(),
+                    scope.clone(),
+                )) as Arc<dyn tinystoragedrivers_api::BlobStore>;
+                let queues = Arc::new(tinystoragedrivers_queue::DocumentQueue::new(&docs))
+                    as Arc<dyn tinystoragedrivers_api::QueueStore>;
+                (docs, streams, kv, blobs, queues, unsupported_secrets())
+            }
             #[cfg(feature = "mongodb")]
             Engine::Mongo {
                 connection,
@@ -519,7 +624,11 @@ impl CompositeBackend {
         Ok(Storage::new(documents, streams, kv, blobs, queues, secrets))
     }
 
-    #[cfg(any(feature = "sqlite", feature = "mongodb"))]
+    #[cfg(any(feature = "sqlite", feature = "libsql", feature = "mongodb"))]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one arm per engine feature; each arm only wires that engine's ports"
+    )]
     fn open_conditioned_scope(&self, scope: &Scope, condition: &WriteCondition) -> Result<Storage> {
         use std::sync::Arc;
         use tinystoragedrivers_api::Storage;
@@ -548,6 +657,43 @@ impl CompositeBackend {
                     condition.clone(),
                 )?) as Arc<dyn tinystoragedrivers_api::KvStore>;
                 let blobs = Arc::new(tinystoragedrivers_blob::SqliteBlobStore::conditioned(
+                    connection.clone(),
+                    scope.clone(),
+                    condition.clone(),
+                )) as Arc<dyn tinystoragedrivers_api::BlobStore>;
+                let queues = Arc::new(tinystoragedrivers_queue::DocumentQueue::new(&documents))
+                    as Arc<dyn tinystoragedrivers_api::QueueStore>;
+                Ok(Storage::new(
+                    documents,
+                    streams,
+                    kv,
+                    blobs,
+                    queues,
+                    unsupported.secrets().clone(),
+                ))
+            }
+            #[cfg(feature = "libsql")]
+            Engine::Libsql(connection) => {
+                let documents = Arc::new(
+                    tinystoragedrivers_document::libsql::LibsqlDocuments::conditioned(
+                        connection.clone(),
+                        scope.clone(),
+                        condition.clone(),
+                    ),
+                ) as Arc<dyn tinystoragedrivers_api::DocumentStore>;
+                let streams = Arc::new(
+                    tinystoragedrivers_document::libsql::LibsqlStreams::conditioned(
+                        connection.clone(),
+                        scope.clone(),
+                        condition.clone(),
+                    ),
+                ) as Arc<dyn tinystoragedrivers_api::StreamStore>;
+                let kv = Arc::new(tinystoragedrivers_kv::LibsqlKv::conditioned(
+                    connection.clone(),
+                    scope.clone(),
+                    condition.clone(),
+                )) as Arc<dyn tinystoragedrivers_api::KvStore>;
+                let blobs = Arc::new(tinystoragedrivers_blob::LibsqlBlobStore::conditioned(
                     connection.clone(),
                     scope.clone(),
                     condition.clone(),
@@ -602,7 +748,7 @@ impl CompositeBackend {
         }
     }
 
-    #[cfg(not(any(feature = "sqlite", feature = "mongodb")))]
+    #[cfg(not(any(feature = "sqlite", feature = "libsql", feature = "mongodb")))]
     #[allow(
         clippy::unused_self,
         reason = "the memory-only build has no engine to condition, while this method must implement the shared backend contract"
@@ -619,7 +765,12 @@ impl CompositeBackend {
     }
 }
 
-#[cfg(any(feature = "file", feature = "sqlite", feature = "mongodb"))]
+#[cfg(any(
+    feature = "file",
+    feature = "sqlite",
+    feature = "libsql",
+    feature = "mongodb"
+))]
 fn unsupported_secrets() -> Arc<dyn tinystoragedrivers_api::SecretStore> {
     Storage::unsupported().secrets().clone()
 }

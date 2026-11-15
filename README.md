@@ -14,9 +14,9 @@ The workspace contains twelve crates:
 | --- | --- |
 | `tinystoragedrivers-types` | Shared values, errors, scopes, capabilities, and request/result types |
 | `tinystoragedrivers-api` | Async storage ports and the `StorageBackend` / `Storage` bundle |
-| `tinystoragedrivers-document` | Document and stream primitives; memory, SQLite, MongoDB, and file engines |
-| `tinystoragedrivers-kv` | Key/value primitive; memory, SQLite, MongoDB, and file engines |
-| `tinystoragedrivers-blob` | Blob primitive; memory, filesystem, SQLite, MongoDB, and S3 engines |
+| `tinystoragedrivers-document` | Document and stream primitives; memory, SQLite, libSQL, MongoDB, and file engines |
+| `tinystoragedrivers-kv` | Key/value primitive; memory, SQLite, libSQL, MongoDB, and file engines |
+| `tinystoragedrivers-blob` | Blob primitive; memory, filesystem, SQLite, libSQL, MongoDB, and S3 engines |
 | `tinystoragedrivers-queue` | Queue primitive; memory, document-backed, and RabbitMQ engines |
 | `tinystoragedrivers-secrets` | Secret-store engines, including memory, file, document, keyring, and KMS |
 | `tinystoragedrivers-connect` | Shared engine connection setup used by primitive adapters |
@@ -46,6 +46,14 @@ host or module that owns the records and lifecycle. Durable backends expose an
 unsupported secret port until the host supplies an explicit secret store and
 key provider. Shared durable connections come from
 `tinystoragedrivers-connect`.
+
+The `libsql` feature stores the SQLite engines' layout in a libSQL database: a
+remote one (`libsql://…`, `https://…`, `http://…` with optional `authToken`
+and `tablePrefix` query parameters) or a local file (`StorageConfig::Libsql`
+with a `file:` URL). A table prefix lets the driver's tables share a database
+with tables it does not own; the SQLite handle accepts one too
+(`SqliteConnection::open_prefixed`). `libsql` and `sqlite` both bundle SQLite's
+C library, so a binary links one of them, never both.
 
 ## Development
 

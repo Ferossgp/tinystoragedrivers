@@ -32,6 +32,8 @@ tinystoragedrivers-document = { workspace = true, features = ["memory"] }
 default = []
 file = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/file", "tinystoragedrivers-document/file", "tinystoragedrivers-kv/file", "tinystoragedrivers-blob/fs"]
 sqlite = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/sqlite", "tinystoragedrivers-document/sqlite", "tinystoragedrivers-kv/sqlite", "tinystoragedrivers-blob/sqlite"]
+# Cannot link into one binary with `sqlite`: both bundle SQLite's C symbols.
+libsql = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/libsql", "tinystoragedrivers-document/libsql", "tinystoragedrivers-kv/libsql", "tinystoragedrivers-blob/libsql"]
 mongodb = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/mongodb", "tinystoragedrivers-document/mongodb", "tinystoragedrivers-kv/mongodb", "tinystoragedrivers-blob/mongodb"]
 s3 = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/s3", "tinystoragedrivers-blob/s3"]
 rabbitmq = ["tinystoragedrivers-queue/rabbitmq"]
