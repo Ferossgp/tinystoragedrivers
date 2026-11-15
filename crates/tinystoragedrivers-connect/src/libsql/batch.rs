@@ -13,8 +13,9 @@
 //!   `(-9223372036854775807-1)`), NULL is `NULL`, and a real is the shortest
 //!   decimal that reads back to the same `f64`.
 //! - NaN and infinities have no SQL literal and are refused with an error.
-//! - Named placeholders, a placeholder without a value and a value without a
-//!   placeholder are refused with an error.
+//! - Named placeholders, `?` mixed with `?NNN` in one statement, a
+//!   placeholder without a value and a value without a placeholder are
+//!   refused with an error.
 
 use std::borrow::Cow;
 use std::fmt::Write as _;
@@ -102,6 +103,7 @@ fn inline(sql: &str, params: &[Value]) -> libsql::Result<String> {
     let mut out = String::with_capacity(sql.len() + params.len() * 16);
     let mut used = vec![false; params.len()];
     let mut next_positional = 0usize;
+    let mut style: Option<bool> = None;
     let mut state = Lexeme::Code;
     let mut chars = sql.char_indices().peekable();
     while let Some((_, c)) = chars.next() {
@@ -130,14 +132,18 @@ fn inline(sql: &str, params: &[Value]) -> libsql::Result<String> {
                         digits.push(*digit);
                         chars.next();
                     }
-                    let index = if digits.is_empty() {
-                        next_positional
-                    } else {
+                    let numbered = !digits.is_empty();
+                    if *style.get_or_insert(numbered) != numbered {
+                        return Err(misuse("a statement mixes `?` and `?NNN` placeholders"));
+                    }
+                    let index = if numbered {
                         digits
                             .parse::<usize>()
                             .ok()
                             .and_then(|n| n.checked_sub(1))
                             .ok_or_else(|| misuse("placeholder ?0 is invalid"))?
+                    } else {
+                        next_positional
                     };
                     next_positional = index + 1;
                     let value = params
