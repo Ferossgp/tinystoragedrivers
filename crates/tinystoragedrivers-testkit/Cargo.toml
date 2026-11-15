@@ -10,7 +10,7 @@ description = "In-memory storage and conformance tools for tinystoragedrivers co
 [dependencies]
 tinystoragedrivers-types = { workspace = true }
 tinystoragedrivers-api = { workspace = true }
-tinystoragedrivers-document = { workspace = true, features = ["memory", "sqlite"] }
+tinystoragedrivers-document = { workspace = true, features = ["memory"] }
 tinystoragedrivers-kv = { workspace = true, features = ["memory"] }
 tinystoragedrivers-blob = { workspace = true, features = ["memory"] }
 tinystoragedrivers-queue = { workspace = true, features = ["memory"] }
@@ -27,6 +27,9 @@ zeroize = { workspace = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }
 tempfile = { workspace = true }
 tinystoragedrivers-connect = { workspace = true, features = ["sqlite"] }
+# The SQLite engine conformance test; a dev-dependency so a consumer can run
+# the suites against an engine that links another SQLite build (libSQL).
+tinystoragedrivers-document = { workspace = true, features = ["memory", "sqlite"] }
 
 [lints]
 workspace = true

@@ -11,6 +11,8 @@ pub use file::documents::FileDocuments;
 pub use file::fsio;
 #[cfg(feature = "file")]
 pub use file::streams::FileStreams;
+#[cfg(feature = "libsql")]
+pub mod libsql;
 #[cfg(feature = "memory")]
 pub mod memory;
 #[cfg(feature = "mongodb")]

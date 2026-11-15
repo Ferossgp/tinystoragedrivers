@@ -101,13 +101,13 @@ pub(crate) fn duration_millis(ttl: Duration) -> u64 {
 }
 
 /// Convert a version to a signed integer representation used by SQL-backed engines.
-#[cfg(any(feature = "sqlite", feature = "mongodb"))]
+#[cfg(any(feature = "sqlite", feature = "libsql", feature = "mongodb"))]
 pub(crate) fn version_to_i64(version: Version) -> Result<i64> {
     i64::try_from(version.0).map_err(|_| StorageError::backend("key version space is exhausted"))
 }
 
 /// Convert a stored SQL integer back to a validated version.
-#[cfg(feature = "sqlite")]
+#[cfg(any(feature = "sqlite", feature = "libsql"))]
 pub(crate) fn from_sqlite_version(version: i64) -> Result<Version> {
     u64::try_from(version)
         .map(Version)

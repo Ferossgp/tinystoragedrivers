@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Memory, file, SQLite, and MongoDB JSON key/value storage primitives."
+description = "Memory, file, SQLite, libSQL, and MongoDB JSON key/value storage primitives."
 readme = "README.md"
 keywords = ["storage", "key-value", "sqlite", "mongodb"]
 categories = ["database"]
@@ -15,6 +15,7 @@ publish = false
 default = ["memory"]
 memory = []
 sqlite = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/sqlite"]
+libsql = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/libsql"]
 mongodb = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/mongodb", "dep:tinystoragedrivers-document", "tinystoragedrivers-document/mongodb", "dep:mongodb", "dep:futures-util"]
 file = ["dep:libc", "dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/file"]
 

@@ -2,8 +2,8 @@
 //! [`KvStore`](tinystoragedrivers_api::KvStore) port.
 //!
 //! The default `memory` feature is useful for ephemeral state and tests. The
-//! optional `file`, `sqlite`, and `mongodb` features persist values using
-//! engine-native KV storage without routing through document records.
+//! optional `file`, `sqlite`, `libsql`, and `mongodb` features persist values
+//! using engine-native KV storage without routing through document records.
 //!
 //! # Example
 //!
@@ -47,6 +47,11 @@ pub use file::FileKv;
 mod sqlite;
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteKv;
+
+#[cfg(feature = "libsql")]
+mod libsql;
+#[cfg(feature = "libsql")]
+pub use libsql::LibsqlKv;
 
 #[cfg(feature = "mongodb")]
 mod mongodb;

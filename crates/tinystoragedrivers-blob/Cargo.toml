@@ -13,6 +13,7 @@ default = ["memory"]
 memory = []
 fs = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/file"]
 sqlite = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/sqlite", "dep:sha2"]
+libsql = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/libsql", "dep:sha2"]
 mongodb = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/mongodb", "dep:mongodb", "dep:futures-util"]
 s3 = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/s3", "dep:object_store", "dep:futures-util", "dep:http"]
 

@@ -28,6 +28,11 @@ mod sqlite;
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteBlobStore;
 
+#[cfg(feature = "libsql")]
+mod libsql;
+#[cfg(feature = "libsql")]
+pub use libsql::LibsqlBlobStore;
+
 #[cfg(feature = "mongodb")]
 mod mongodb;
 #[cfg(feature = "mongodb")]

@@ -12,6 +12,7 @@ publish = false
 default = ["memory"]
 memory = []
 sqlite = ["dep:rusqlite", "dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/sqlite", "dep:tokio"]
+libsql = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/libsql"]
 mongodb = ["dep:mongodb", "dep:futures-util", "dep:tokio", "dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/mongodb"]
 file = ["dep:tokio", "dep:libc", "dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/file"]
 polling-watch = ["dep:tokio"]
