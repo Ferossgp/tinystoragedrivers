@@ -4286,6 +4286,7 @@ dependencies = [
  "hyper 0.14.32",
  "lapin",
  "libsql",
+ "libsql-hrana",
  "mongodb",
  "object_store",
  "rusqlite",

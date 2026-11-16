@@ -15,6 +15,7 @@
 
 mod batch;
 pub mod error;
+mod read;
 mod response;
 mod schema;
 mod transport;
@@ -27,6 +28,7 @@ use std::time::Duration;
 
 pub use batch::{Statement, transactional_batch};
 pub use libsql;
+pub use read::Reader;
 use tinystoragedrivers_types::{CollectionSpec, Result};
 pub use tx::{Row, Tx, query};
 
@@ -114,6 +116,28 @@ struct Inner {
     clock: Clock,
     specs: Mutex<HashMap<String, CollectionSpec>>,
     location: String,
+    reader: Option<Reader>,
+}
+
+/// The connection of a [`LibsqlConnection`] while [`LibsqlConnection::lock`]
+/// holds it, with the database's one-request [`Reader`] for [`query`].
+pub struct Locked<'a> {
+    conn: tokio::sync::MutexGuard<'a, libsql::Connection>,
+    reader: Option<&'a Reader>,
+}
+
+impl std::ops::Deref for Locked<'_> {
+    type Target = libsql::Connection;
+
+    fn deref(&self) -> &libsql::Connection {
+        &self.conn
+    }
+}
+
+impl fmt::Debug for Locked<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Locked").finish_non_exhaustive()
+    }
 }
 
 impl fmt::Debug for LibsqlConnection {
@@ -154,6 +178,7 @@ impl LibsqlConnection {
         schema::ensure(&tables, &conn).await?;
         // Credentials never ride in the URL, but a query string might.
         let location = url.split('?').next().unwrap_or_default().to_owned();
+        let reader = Reader::open(url, auth_token).map_err(error::during("open"))?;
         Ok(Self {
             inner: Arc::new(Inner {
                 conn: tokio::sync::Mutex::new(conn),
@@ -161,6 +186,7 @@ impl LibsqlConnection {
                 clock,
                 specs: Mutex::new(HashMap::new()),
                 location,
+                reader,
             }),
         })
     }
@@ -170,12 +196,15 @@ impl LibsqlConnection {
     /// inside a [`Tx`] leaves its transaction open; the next caller recovers
     /// the connection first (see [`recover`]). A failed request recovers in
     /// [`query`] and [`Tx::finish`].
-    pub async fn lock(&self) -> tokio::sync::MutexGuard<'_, libsql::Connection> {
+    pub async fn lock(&self) -> Locked<'_> {
         let conn = self.inner.conn.lock().await;
         if !conn.is_autocommit() {
             recover(&conn).await;
         }
-        conn
+        Locked {
+            conn,
+            reader: self.inner.reader.as_ref(),
+        }
     }
 
     /// Return the injected clock shared by all primitive adapters.

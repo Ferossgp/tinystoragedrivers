@@ -6,8 +6,8 @@
 //! writes go with the commit. On a stream that is already sealed, sealing only
 //! deletes leftover rows.
 
-use tinystoragedrivers_connect::libsql::libsql::{Connection, Value as SqlValue};
-use tinystoragedrivers_connect::libsql::{Tx, query};
+use tinystoragedrivers_connect::libsql::libsql::Value as SqlValue;
+use tinystoragedrivers_connect::libsql::{Locked, Tx, query};
 use tinystoragedrivers_types::{Result, SealOutcome, StorageError};
 
 use super::{LibsqlStreams, head_of, head_statement, to_offset};
@@ -24,7 +24,7 @@ fn missing_blob() -> StorageError {
 
 /// The entries of a sealed stream, decoded from its blob.
 pub(super) async fn read_sealed(
-    conn: &Connection,
+    conn: &Locked<'_>,
     tables: &SqliteTables,
     scope: &str,
     stream: &str,

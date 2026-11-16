@@ -17,9 +17,9 @@ use libsql::params::IntoParams;
 use libsql::{Connection, Value};
 use tinystoragedrivers_types::{Result, StorageError, WriteCondition};
 
-use super::Statement;
 use super::error::{commit_failed, during, unknown_outcome};
 use super::transactional_batch;
+use super::{Locked, Statement};
 use crate::SqliteTables;
 use crate::layout::{GuardRow, StoredBody, judge_clause};
 
@@ -131,11 +131,27 @@ fn corrupt(what: &str) -> StorageError {
 }
 
 /// Run `reads` without a write transaction and return each one's rows.
-/// Several reads share one read transaction, so they see one snapshot.
+/// Several reads share one read transaction, so they see one snapshot. A
+/// single read of a remote database is one request ([`super::Reader`]).
 ///
 /// # Errors
 /// Returns the first failing statement's error, mapped for `operation`.
 pub async fn query(
+    conn: &Locked<'_>,
+    operation: &'static str,
+    reads: &[Statement],
+) -> Result<Vec<Vec<Row>>> {
+    if let ([read], Some(reader)) = (reads, conn.reader)
+        && conn.is_autocommit()
+    {
+        let rows = within(operation, reader.query(read.sql(), read.params().to_vec())).await?;
+        return Ok(vec![rows.into_iter().map(Row).collect()]);
+    }
+    query_on(conn, operation, reads).await
+}
+
+/// [`query`] on a bare connection, every read through libSQL.
+pub(crate) async fn query_on(
     conn: &Connection,
     operation: &'static str,
     reads: &[Statement],

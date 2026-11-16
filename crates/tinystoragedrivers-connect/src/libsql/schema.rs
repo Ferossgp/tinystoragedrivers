@@ -8,7 +8,8 @@ use libsql::Connection;
 use tinystoragedrivers_types::{Result, StorageError};
 
 use super::error::during;
-use super::{Row, Statement, query, transactional_batch};
+use super::tx::query_on;
+use super::{Row, Statement, transactional_batch};
 use crate::SqliteTables;
 use crate::layout::{LAYOUT, same_declaration};
 
@@ -16,7 +17,7 @@ use crate::layout::{LAYOUT, same_declaration};
 pub(super) async fn ensure(tables: &SqliteTables, conn: &Connection) -> Result<()> {
     let declarations = declarations(tables);
     let schema = schema_query(&declarations).map_err(during("inspect existing schema"))?;
-    let found = query(
+    let found = query_on(
         conn,
         "inspect existing schema",
         std::slice::from_ref(&schema),
@@ -29,7 +30,7 @@ pub(super) async fn ensure(tables: &SqliteTables, conn: &Connection) -> Result<(
             .map_err(during("create tables"))?;
     }
     let layout = Statement::new(tables.layout_query(), ()).map_err(during("read layout"))?;
-    let mut found = query(conn, "inspect existing schema", &[schema, layout]).await?;
+    let mut found = query_on(conn, "inspect existing schema", &[schema, layout]).await?;
     let layout = found.pop().unwrap_or_default();
     let stored = found.pop().unwrap_or_default();
     validate(&declarations, &stored, &layout)

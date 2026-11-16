@@ -8,8 +8,8 @@
 
 use serde_json::Value;
 use tinystoragedrivers_connect::LibsqlConnection;
-use tinystoragedrivers_connect::libsql::libsql::{Connection, Value as SqlValue};
-use tinystoragedrivers_connect::libsql::{Row, Statement, Tx, query};
+use tinystoragedrivers_connect::libsql::libsql::Value as SqlValue;
+use tinystoragedrivers_connect::libsql::{Locked, Row, Statement, Tx, query};
 use tinystoragedrivers_types::{
     CollectionSpec, CursorPosition, Filter, Meta, Precondition, Result, Sort, StorageError,
     Version, Versioned, WriteOptions, sort_documents_with_meta, validate_collection, validate_doc,
@@ -40,7 +40,7 @@ impl<'a> Ctx<'a> {
 /// Where reads run: on their own, or in a write transaction.
 #[derive(Debug)]
 pub(crate) enum Reader<'r, 'c> {
-    Plain(&'r Connection),
+    Plain(&'r Locked<'c>),
     Tx(&'r mut Tx<'c>),
 }
 
@@ -116,7 +116,7 @@ pub(crate) async fn load_spec(
 
 /// Validate actual metadata presence without declaring schema.
 pub(crate) async fn validate_spec(
-    conn: &Connection,
+    conn: &Locked<'_>,
     tables: &SqliteTables,
     required: &CollectionSpec,
 ) -> Result<()> {
@@ -691,7 +691,7 @@ pub(crate) fn drop_collection(tx: &mut Tx<'_>, ctx: Ctx<'_>, collection: &str) -
 
 /// List collections with records (including deleted ones) in one scope.
 pub(crate) async fn collections(
-    conn: &Connection,
+    conn: &Locked<'_>,
     ctx: Ctx<'_>,
     prefix: &str,
 ) -> Result<Vec<String>> {
@@ -714,7 +714,7 @@ pub(crate) async fn collections(
 
 /// Full-text matches, best first.
 pub(crate) async fn search(
-    conn: &Connection,
+    conn: &Locked<'_>,
     ctx: Ctx<'_>,
     collection: &str,
     text: &str,

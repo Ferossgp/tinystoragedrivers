@@ -16,7 +16,7 @@ use serde_json::Value;
 use tinystoragedrivers_api::{StreamStore, async_trait};
 use tinystoragedrivers_connect::LibsqlConnection;
 use tinystoragedrivers_connect::libsql::libsql::{Connection, Value as SqlValue};
-use tinystoragedrivers_connect::libsql::{Row, Statement, Tx, query};
+use tinystoragedrivers_connect::libsql::{Locked, Row, Statement, Tx, query};
 use tinystoragedrivers_types::{
     Capabilities, Capability, Result, Scope, SealOutcome, StorageError, StreamEntry, StreamInfo,
     WriteCondition,
@@ -149,7 +149,7 @@ impl LibsqlStreams {
     }
 
     /// Read one stream head without a transaction.
-    async fn read_head(&self, conn: &Connection, stream: &str) -> Result<Option<Head>> {
+    async fn read_head(&self, conn: &Locked<'_>, stream: &str) -> Result<Option<Head>> {
         let read = head_statement(self.tables(), self.scope(), stream)?;
         let sets = query(conn, "read stream", std::slice::from_ref(&read)).await?;
         head_of(sets.first().map_or(&[], Vec::as_slice))
