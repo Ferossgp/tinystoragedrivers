@@ -1,12 +1,14 @@
-//! Reads and write transactions in as few requests as possible.
+//! Reads and write transactions in few requests.
 //!
-//! A [`Tx`] opens `BEGIN IMMEDIATE` in the same request as its first reads,
-//! queues its writes, and sends them with the next reads or with the
-//! `COMMIT`, so a read-decide-write transaction costs two requests. A
-//! transaction that never reads is sent as one transactional batch. Statements
-//! that share a request are rendered with their parameters inlined
-//! ([`Statement::render`]), because a multi-statement request is SQL text
-//! only.
+//! Every read is its own request: `libsql` sends each statement of a
+//! multi-statement request with `want_rows: false`, and a server that honors
+//! it (Turso Cloud; a local sqld ignores it) returns no rows. Writes carry no
+//! rows, so a [`Tx`] opens `BEGIN IMMEDIATE` and sends its queued writes as
+//! one request before its next reads, and the rest with the `COMMIT`. A
+//! transaction that never reads is sent as one transactional batch.
+//! Statements that share a request are rendered with their parameters
+//! inlined ([`Statement::render`]), because a multi-statement request is SQL
+//! text only.
 
 use std::borrow::Cow;
 use std::time::Duration;
@@ -128,9 +130,8 @@ fn corrupt(what: &str) -> StorageError {
     StorageError::backend(format!("corrupt libsql row: {what}"))
 }
 
-/// Run `reads` without a write transaction in one request and return each
-/// one's rows. Several reads share one read transaction, so they see one
-/// snapshot.
+/// Run `reads` without a write transaction and return each one's rows.
+/// Several reads share one read transaction, so they see one snapshot.
 ///
 /// # Errors
 /// Returns the first failing statement's error, mapped for `operation`.
@@ -141,39 +142,28 @@ pub async fn query(
 ) -> Result<Vec<Vec<Row>>> {
     match reads {
         [] => Ok(Vec::new()),
-        [read] => {
-            let rows = within(conn, operation, async {
-                let mut rows = conn.query(read.sql(), read.params().to_vec()).await?;
-                drain(&mut rows).await
-            })
-            .await?;
-            Ok(vec![rows])
-        }
+        [read] => Ok(vec![read_rows(conn, operation, read).await?]),
         _ => {
-            let mut sql = String::from("BEGIN;\n");
-            for read in reads {
-                push(&mut sql, read).map_err(during(operation))?;
+            let sets = async {
+                within(conn, operation, conn.execute("BEGIN", ())).await?;
+                let sets = read_each(conn, operation, reads).await?;
+                within(conn, operation, conn.execute("COMMIT", ())).await?;
+                Ok(sets)
             }
-            sql.push_str("COMMIT");
-            let sets = within(conn, operation, async {
-                collect(conn.execute_batch(&sql).await?).await
-            })
             .await;
             if sets.is_err() && !conn.is_autocommit() && conn.execute("ROLLBACK", ()).await.is_err()
             {
                 conn.reset().await;
             }
-            let mut sets = expect_sets(sets?, reads.len() + 2)?;
-            sets.pop();
-            Ok(sets.split_off(1))
+            sets
         }
     }
 }
 
 /// One write transaction on a locked connection.
 ///
-/// Reads run inside `BEGIN IMMEDIATE`; writes are queued and sent with the
-/// next read or the commit. End every transaction with [`Tx::finish`], which
+/// Reads run inside `BEGIN IMMEDIATE`; writes are queued and sent before the
+/// next read or with the commit. End every transaction with [`Tx::finish`], which
 /// commits or rolls back.
 #[derive(Debug)]
 pub struct Tx<'a> {
@@ -229,49 +219,36 @@ impl<'a> Tx<'a> {
         Ok(())
     }
 
-    /// Send the queued writes and then `reads` in one request, opening the
-    /// transaction (and checking its condition) first if this is its first
-    /// request; return each read's rows. The reads see the writes.
+    /// Send the queued writes, opening the transaction (and checking its
+    /// condition) first if this is its first request, then run `reads`;
+    /// return each read's rows. The reads see the writes.
     ///
     /// # Errors
     /// Returns `Conflict` when the condition fails, or the first failing
     /// statement's error.
     pub async fn read(&mut self, reads: &[Statement]) -> Result<Vec<Vec<Row>>> {
         let operation = self.operation;
-        let mut sql = String::new();
-        let mut skipped = 0;
-        let mut guards = Vec::new();
-        // The condition is checked once, in the request that opens the
-        // transaction; later reads see the same locked state.
+        let conn = self.conn;
+        // The condition is checked once, when the transaction opens; later
+        // reads see the same locked state.
         let judged = if self.begun { None } else { self.condition };
+        let mut sql = String::new();
         if !self.begun {
             sql.push_str("BEGIN IMMEDIATE;\n");
-            skipped += 1;
-            if let Some((tables, condition, _)) = judged {
-                guards = condition_reads(tables, condition).map_err(during(operation))?;
-            }
         }
         for write in &self.pending {
             push(&mut sql, write).map_err(during(operation))?;
-            skipped += 1;
-        }
-        for read in guards.iter().chain(reads) {
-            push(&mut sql, read).map_err(during(operation))?;
         }
         self.begun = true;
         self.pending.clear();
-        let conn = self.conn;
-        let sets = within(conn, operation, async {
-            collect(conn.execute_batch(&sql).await?).await
-        })
-        .await?;
-        let mut sets = expect_sets(sets, skipped + guards.len() + reads.len())?;
-        let mut answers = sets.split_off(skipped);
-        let rest = answers.split_off(guards.len());
-        if let Some((_, condition, now_ms)) = judged {
-            judge(condition, answers, now_ms)?;
+        if !sql.is_empty() {
+            within(conn, operation, conn.execute_batch(&sql)).await?;
         }
-        Ok(rest)
+        if let Some((tables, condition, now_ms)) = judged {
+            let guards = condition_reads(tables, condition).map_err(during(operation))?;
+            judge(condition, read_each(conn, operation, &guards).await?, now_ms)?;
+        }
+        read_each(conn, operation, reads).await
     }
 
     /// [`Self::read`] for one statement.
@@ -364,15 +341,24 @@ async fn within<T>(
     result.map_err(during(operation))
 }
 
-async fn collect(mut batch: libsql::BatchRows) -> libsql::Result<Vec<Vec<Row>>> {
-    let mut sets = Vec::new();
-    while let Some(entry) = batch.next_stmt_row() {
-        sets.push(match entry {
-            Some(mut rows) => drain(&mut rows).await?,
-            None => Vec::new(),
-        });
+async fn read_each(
+    conn: &Connection,
+    operation: &'static str,
+    reads: &[Statement],
+) -> Result<Vec<Vec<Row>>> {
+    let mut sets = Vec::with_capacity(reads.len());
+    for read in reads {
+        sets.push(read_rows(conn, operation, read).await?);
     }
     Ok(sets)
+}
+
+async fn read_rows(conn: &Connection, operation: &'static str, read: &Statement) -> Result<Vec<Row>> {
+    within(conn, operation, async {
+        let mut rows = conn.query(read.sql(), read.params().to_vec()).await?;
+        drain(&mut rows).await
+    })
+    .await
 }
 
 async fn drain(rows: &mut libsql::Rows) -> libsql::Result<Vec<Row>> {
@@ -384,18 +370,6 @@ async fn drain(rows: &mut libsql::Rows) -> libsql::Result<Vec<Row>> {
             .collect::<libsql::Result<_>>()?));
     }
     Ok(out)
-}
-
-/// A local batch reports no entry for a statement that is all whitespace and
-/// a remote one an entry per statement; ours have none, so the counts match.
-fn expect_sets(sets: Vec<Vec<Row>>, expected: usize) -> Result<Vec<Vec<Row>>> {
-    if sets.len() == expected {
-        Ok(sets)
-    } else {
-        Err(StorageError::backend(
-            "libsql returned a different number of statement results than sent",
-        ))
-    }
 }
 
 /// The document and declaration reads of every clause of `condition`.

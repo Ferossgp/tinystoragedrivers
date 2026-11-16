@@ -7,8 +7,8 @@
 //!
 //! A remote statement costs a network round trip, and the server aborts a
 //! transaction that stays open for five seconds. The engines therefore send
-//! each transaction's reads in as few requests as possible and its writes
-//! with the commit ([`Tx`]), and never keep a transaction open across
+//! each transaction's writes in as few requests as possible, with the commit
+//! where they can ([`Tx`]), and never keep a transaction open across
 //! anything but statements. A remote server rejects `PRAGMA journal_mode`,
 //! `busy_timeout`, `auto_vacuum` and `synchronous`, so none is issued, and
 //! there is no incremental vacuum.

@@ -6,9 +6,9 @@
 //! down to SQL and are re-checked in Rust with [`Filter::matches_with`].
 //!
 //! Every write is one `BEGIN IMMEDIATE` transaction: its reads (condition,
-//! stored row, unique-index candidates) travel in the request that opens it,
-//! and its writes with the commit, so a put costs two requests. That keeps
-//! preconditions, unique indexes, claims and batches atomic.
+//! stored row, unique-index candidates) run inside it, and its writes travel
+//! with the commit. That keeps preconditions, unique indexes, claims and
+//! batches atomic.
 
 pub(crate) mod ops;
 mod order;

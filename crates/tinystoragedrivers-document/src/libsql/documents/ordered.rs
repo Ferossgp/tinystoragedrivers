@@ -2,8 +2,8 @@
 //! engine: when every sort key is SQL-visible and the page is limited, the
 //! database sorts and limits, and Rust judges only the rows it was handed,
 //! continuing from the last row it saw until the page is full. Each page
-//! request returns the whole rows, and the first one also carries the
-//! rounded-number checks, so a page usually costs one request.
+//! read returns the whole rows, and the first one also runs the
+//! rounded-number checks in the same snapshot.
 
 use std::cmp::Ordering;
 

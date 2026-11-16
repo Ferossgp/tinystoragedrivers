@@ -325,7 +325,7 @@ impl StreamStore for LibsqlStreams {
         validate_stream(stream)?;
         let (tables, scope) = (self.tables(), self.scope());
         let conn = self.connection.lock().await;
-        // The head and the rows in one request; the blob only when sealed.
+        // The head and the rows in one snapshot; the blob only when sealed.
         let rows = statement(
             format!(
                 "SELECT seq, body FROM {} WHERE scope = ?1 AND name = ?2 AND seq >= ?3
