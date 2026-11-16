@@ -6,14 +6,14 @@
 //! module when libsql ships rustls 0.23.
 //!
 //! The stream also closes a kept-alive connection that sat idle for
-//! [`IDLE_CLOSE`] after a response. Turso closes an idle keep-alive
-//! connection after 5 s, while libsql builds its hyper 0.14 client with the
-//! default 90 s pool idle timeout and exposes no knob. A request sent on a
-//! pooled connection near the 5 s mark races the server's close and fails
-//! with "connection closed before message completed", after the request may
-//! have been sent, so it cannot be retried safely. Reporting end of stream
-//! to hyper while the connection is idle makes hyper drop it from the pool;
-//! the next request opens a fresh connection.
+//! [`IDLE_CLOSE`] after a complete response. Turso closes an idle
+//! keep-alive connection after 5 s, while libsql builds its hyper 0.14
+//! client with the default 90 s pool idle timeout and exposes no knob. A
+//! request sent on a pooled connection near the 5 s mark races the server's
+//! close and fails with "connection closed before message completed", after
+//! the request may have been sent, so it cannot be retried safely. Reporting
+//! end of stream to hyper while the connection is idle makes hyper drop it
+//! from the pool; the next request opens a fresh connection.
 
 use std::io;
 use std::pin::Pin;
@@ -27,13 +27,15 @@ use tokio::net::TcpStream;
 use tokio::time::{Instant, Sleep};
 use tokio_rustls::client::TlsStream;
 
-/// Idle time after a response at which this side closes a pooled
+use super::response::Response;
+
+/// Idle time after a complete response at which this side closes a pooled
 /// connection: below Turso's 5 s keep-alive close, by more than a round trip.
 ///
-/// Ceiling: the timer runs whenever response bytes were the last traffic, so
-/// a response whose body stalls for this long mid-stream is cut off. Hrana
-/// answers stream within Turso's own 5 s transaction limit; raise this (and
-/// keep it below the server's idle close) if a server streams slower.
+/// The timer runs only between the end of a response ([`Response`]) and the
+/// next request, so a slow or stalled response is never cut. A response the
+/// reader cannot frame never arms it; that connection keeps the server-close
+/// race this removes.
 const IDLE_CLOSE: Duration = Duration::from_secs(3);
 
 /// Opens plain TCP for `http://` URIs and verified TLS for `https://` URIs.
@@ -105,14 +107,12 @@ enum Io {
     Tls(Box<TlsStream<TcpStream>>),
 }
 
-/// Where the connection is in hyper's request/response cycle, as far as the
-/// bytes show.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// Where the connection is in hyper's request/response cycle.
 enum Phase {
-    /// Connected, or a request was written: an answer is owed, no timer.
-    Exchanging,
-    /// Response bytes were the last traffic: idle once they stop.
-    Answered,
+    /// Connected, or a request was written: reading its response, no timer.
+    Exchanging(Response),
+    /// The response is complete and no request followed: the timer runs.
+    Idle,
     /// Idle past [`IDLE_CLOSE`]; reads report end of stream from now on.
     Closed,
 }
@@ -128,7 +128,7 @@ impl Stream {
     fn new(io: Io) -> Self {
         Self {
             io,
-            phase: Phase::Exchanging,
+            phase: Phase::Exchanging(Response::new()),
             idle: Box::pin(tokio::time::sleep(IDLE_CLOSE)),
         }
     }
@@ -147,7 +147,7 @@ impl AsyncRead for Stream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        if this.phase == Phase::Closed {
+        if matches!(this.phase, Phase::Closed) {
             return Poll::Ready(Ok(()));
         }
         let before = buf.filled().len();
@@ -156,13 +156,17 @@ impl AsyncRead for Stream {
             Io::Tls(stream) => Pin::new(stream.as_mut()).poll_read(cx, buf),
         };
         match read {
-            Poll::Ready(Ok(())) if buf.filled().len() > before => {
-                this.phase = Phase::Answered;
-                this.idle.as_mut().reset(Instant::now() + IDLE_CLOSE);
+            Poll::Ready(Ok(())) => {
+                if let Phase::Exchanging(response) = &mut this.phase
+                    && response.feed(&buf.filled()[before..])
+                {
+                    this.phase = Phase::Idle;
+                    this.idle.as_mut().reset(Instant::now() + IDLE_CLOSE);
+                }
                 Poll::Ready(Ok(()))
             }
             Poll::Pending
-                if this.phase == Phase::Answered && this.idle.as_mut().poll(cx).is_ready() =>
+                if matches!(this.phase, Phase::Idle) && this.idle.as_mut().poll(cx).is_ready() =>
             {
                 this.phase = Phase::Closed;
                 Poll::Ready(Ok(()))
@@ -183,8 +187,8 @@ impl AsyncWrite for Stream {
             Io::Plain(stream) => Pin::new(stream).poll_write(cx, buf),
             Io::Tls(stream) => Pin::new(stream.as_mut()).poll_write(cx, buf),
         };
-        if matches!(written, Poll::Ready(Ok(n)) if n > 0) && this.phase == Phase::Answered {
-            this.phase = Phase::Exchanging;
+        if matches!(written, Poll::Ready(Ok(n)) if n > 0) && matches!(this.phase, Phase::Idle) {
+            this.phase = Phase::Exchanging(Response::new());
         }
         written
     }

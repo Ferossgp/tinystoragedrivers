@@ -15,6 +15,7 @@
 
 mod batch;
 pub mod error;
+mod response;
 mod schema;
 mod transport;
 mod tx;
