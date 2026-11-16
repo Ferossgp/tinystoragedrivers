@@ -245,6 +245,11 @@ impl<'a> Tx<'a> {
             within(conn, operation, conn.execute_batch(&sql)).await?;
         }
         if let Some((tables, condition, now_ms)) = judged {
+            // Ceiling: guard reads run one after another, about 4 round trips
+            // per clause (two reads, each a describe and an execute). Above
+            // ~150 ms round trip, a mutation with many guards can exceed
+            // Turso's 5 s transaction limit; batch the guard reads if agentd
+            // moves away from the database region.
             let guards = condition_reads(tables, condition).map_err(during(operation))?;
             judge(condition, read_each(conn, operation, &guards).await?, now_ms)?;
         }

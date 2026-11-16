@@ -4,16 +4,37 @@
 //! libSQL's own `tls` feature links `hyper-rustls` 0.25, whose rustls-webpki
 //! 0.102 accepts distrusted intermediates (RUSTSEC-2026-0382). Remove this
 //! module when libsql ships rustls 0.23.
+//!
+//! The stream also closes a kept-alive connection that sat idle for
+//! [`IDLE_CLOSE`] after a response. Turso closes an idle keep-alive
+//! connection after 5 s, while libsql builds its hyper 0.14 client with the
+//! default 90 s pool idle timeout and exposes no knob. A request sent on a
+//! pooled connection near the 5 s mark races the server's close and fails
+//! with "connection closed before message completed", after the request may
+//! have been sent, so it cannot be retried safely. Reporting end of stream
+//! to hyper while the connection is idle makes hyper drop it from the pool;
+//! the next request opens a fresh connection.
 
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use hyper::client::connect::{Connected, Connection};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
+use tokio::time::{Instant, Sleep};
 use tokio_rustls::client::TlsStream;
+
+/// Idle time after a response at which this side closes a pooled
+/// connection: below Turso's 5 s keep-alive close, by more than a round trip.
+///
+/// Ceiling: the timer runs whenever response bytes were the last traffic, so
+/// a response whose body stalls for this long mid-stream is cut off. Hrana
+/// answers stream within Turso's own 5 s transaction limit; raise this (and
+/// keep it below the server's idle close) if a server streams slower.
+const IDLE_CLOSE: Duration = Duration::from_secs(3);
 
 /// Opens plain TCP for `http://` URIs and verified TLS for `https://` URIs.
 #[derive(Clone)]
@@ -66,11 +87,11 @@ impl tower_service::Service<http::Uri> for Connector {
             let tcp = TcpStream::connect((host.as_str(), port)).await?;
             tcp.set_nodelay(true)?;
             if !secure {
-                return Ok(Stream::Plain(tcp));
+                return Ok(Stream::new(Io::Plain(tcp)));
             }
             let name = rustls::pki_types::ServerName::try_from(host)
                 .map_err(|_| invalid("libsql transport host is not a valid server name"))?;
-            Ok(Stream::Tls(Box::new(tls.connect(name, tcp).await?)))
+            Ok(Stream::new(Io::Tls(Box::new(tls.connect(name, tcp).await?))))
         })
     }
 }
@@ -79,10 +100,38 @@ fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
 
-/// A connected transport stream.
-pub(crate) enum Stream {
+enum Io {
     Plain(TcpStream),
     Tls(Box<TlsStream<TcpStream>>),
+}
+
+/// Where the connection is in hyper's request/response cycle, as far as the
+/// bytes show.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// Connected, or a request was written: an answer is owed, no timer.
+    Exchanging,
+    /// Response bytes were the last traffic: idle once they stop.
+    Answered,
+    /// Idle past [`IDLE_CLOSE`]; reads report end of stream from now on.
+    Closed,
+}
+
+/// A connected transport stream.
+pub(crate) struct Stream {
+    io: Io,
+    phase: Phase,
+    idle: Pin<Box<Sleep>>,
+}
+
+impl Stream {
+    fn new(io: Io) -> Self {
+        Self {
+            io,
+            phase: Phase::Exchanging,
+            idle: Box::pin(tokio::time::sleep(IDLE_CLOSE)),
+        }
+    }
 }
 
 impl Connection for Stream {
@@ -97,9 +146,28 @@ impl AsyncRead for Stream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Self::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
-            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_read(cx, buf),
+        let this = self.get_mut();
+        if this.phase == Phase::Closed {
+            return Poll::Ready(Ok(()));
+        }
+        let before = buf.filled().len();
+        let read = match &mut this.io {
+            Io::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
+            Io::Tls(stream) => Pin::new(stream.as_mut()).poll_read(cx, buf),
+        };
+        match read {
+            Poll::Ready(Ok(())) if buf.filled().len() > before => {
+                this.phase = Phase::Answered;
+                this.idle.as_mut().reset(Instant::now() + IDLE_CLOSE);
+                Poll::Ready(Ok(()))
+            }
+            Poll::Pending
+                if this.phase == Phase::Answered && this.idle.as_mut().poll(cx).is_ready() =>
+            {
+                this.phase = Phase::Closed;
+                Poll::Ready(Ok(()))
+            }
+            other => other,
         }
     }
 }
@@ -110,23 +178,28 @@ impl AsyncWrite for Stream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        match self.get_mut() {
-            Self::Plain(stream) => Pin::new(stream).poll_write(cx, buf),
-            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_write(cx, buf),
+        let this = self.get_mut();
+        let written = match &mut this.io {
+            Io::Plain(stream) => Pin::new(stream).poll_write(cx, buf),
+            Io::Tls(stream) => Pin::new(stream.as_mut()).poll_write(cx, buf),
+        };
+        if matches!(written, Poll::Ready(Ok(n)) if n > 0) && this.phase == Phase::Answered {
+            this.phase = Phase::Exchanging;
         }
+        written
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Self::Plain(stream) => Pin::new(stream).poll_flush(cx),
-            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_flush(cx),
+        match &mut self.get_mut().io {
+            Io::Plain(stream) => Pin::new(stream).poll_flush(cx),
+            Io::Tls(stream) => Pin::new(stream.as_mut()).poll_flush(cx),
         }
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Self::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
-            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_shutdown(cx),
+        match &mut self.get_mut().io {
+            Io::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
+            Io::Tls(stream) => Pin::new(stream.as_mut()).poll_shutdown(cx),
         }
     }
 }
