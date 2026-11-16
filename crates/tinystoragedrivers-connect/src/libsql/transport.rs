@@ -6,7 +6,7 @@
 //! module when libsql ships rustls 0.23.
 //!
 //! The stream also closes a kept-alive connection that sat idle for
-//! [`IDLE_CLOSE`] after a complete response. Turso closes an idle
+//! [`IDLE_CLOSE`] with no request in flight. Turso closes an idle
 //! keep-alive connection after 5 s, while libsql builds its hyper 0.14
 //! client with the default 90 s pool idle timeout and exposes no knob. A
 //! request sent on a pooled connection near the 5 s mark races the server's
@@ -14,6 +14,12 @@
 //! the request may have been sent, so it cannot be retried safely. Reporting
 //! end of stream to hyper while the connection is idle makes hyper drop it
 //! from the pool; the next request opens a fresh connection.
+//!
+//! A fresh connection is idle too: Turso closes one that carried no request
+//! 5 s after the handshake. hyper pools such connections when a request
+//! waits for a free connection, starts a new one, and a pooled connection
+//! frees up first: the new connection finishes in the background and joins
+//! the pool unused (`hyper-0.14.32/src/client/client.rs:383-401`).
 
 use std::io;
 use std::pin::Pin;
@@ -29,13 +35,13 @@ use tokio_rustls::client::TlsStream;
 
 use super::response::Response;
 
-/// Idle time after a complete response at which this side closes a pooled
+/// Idle time with no request in flight at which this side closes a pooled
 /// connection: below Turso's 5 s keep-alive close, by more than a round trip.
 ///
-/// The timer runs only between the end of a response ([`Response`]) and the
-/// next request, so a slow or stalled response is never cut. A response the
-/// reader cannot frame never arms it; that connection keeps the server-close
-/// race this removes.
+/// The timer runs from the connect, and from the end of each response
+/// ([`Response`]), until the next request, so a slow or stalled response is
+/// never cut. A response the reader cannot frame never arms it; that
+/// connection keeps the server-close race this removes.
 const IDLE_CLOSE: Duration = Duration::from_secs(3);
 
 /// Opens plain TCP for `http://` URIs and verified TLS for `https://` URIs.
@@ -111,9 +117,10 @@ enum Io {
 
 /// Where the connection is in hyper's request/response cycle.
 enum Phase {
-    /// Connected, or a request was written: reading its response, no timer.
+    /// A request was written: reading its response, no timer.
     Exchanging(Response),
-    /// The response is complete and no request followed: the timer runs.
+    /// Connected or the response is complete, and no request followed: the
+    /// timer runs.
     Idle,
     /// Idle past [`IDLE_CLOSE`]; reads report end of stream from now on.
     Closed,
@@ -130,7 +137,7 @@ impl Stream {
     fn new(io: Io) -> Self {
         Self {
             io,
-            phase: Phase::Exchanging(Response::new()),
+            phase: Phase::Idle,
             idle: Box::pin(tokio::time::sleep(IDLE_CLOSE)),
         }
     }
