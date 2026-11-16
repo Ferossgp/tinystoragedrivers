@@ -98,6 +98,33 @@ pub async fn recover(conn: &libsql::Connection) {
     conn.reset().await;
 }
 
+/// Send `request` on `conn`; when it went out outside a transaction on a
+/// stream the server no longer knows, reset the stream and send it once more.
+///
+/// Safe because the server ran nothing on an unknown stream. A request inside
+/// a transaction is never repeated: its transaction is gone with the stream.
+/// This covers a stream the server dropped between two healthy calls, which
+/// [`recover`] cannot see coming.
+///
+/// # Errors
+/// The error of the last attempt.
+pub async fn retry_lost_stream<T, F>(
+    conn: &libsql::Connection,
+    request: impl Fn() -> F,
+) -> libsql::Result<T>
+where
+    F: Future<Output = libsql::Result<T>>,
+{
+    let autocommit = conn.is_autocommit();
+    match request().await {
+        Err(error) if autocommit && error::stream_lost(&error) => {
+            conn.reset().await;
+            request().await
+        }
+        outcome => outcome,
+    }
+}
+
 /// One libSQL connection shared by every primitive engine of a database.
 ///
 /// Statements of all clones run one at a time, in order, because a

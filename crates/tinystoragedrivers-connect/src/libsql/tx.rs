@@ -19,7 +19,7 @@ use tinystoragedrivers_types::{Result, StorageError, WriteCondition};
 
 use super::error::{commit_failed, during, unknown_outcome};
 use super::transactional_batch;
-use super::{Locked, Statement};
+use super::{Locked, Statement, retry_lost_stream};
 use crate::SqliteTables;
 use crate::layout::{GuardRow, StoredBody, judge_clause};
 
@@ -163,7 +163,11 @@ pub(crate) async fn query_on(
             .map(|rows| vec![rows]),
         _ => {
             async {
-                within(operation, conn.execute("BEGIN", ())).await?;
+                within(
+                    operation,
+                    retry_lost_stream(conn, || conn.execute("BEGIN", ())),
+                )
+                .await?;
                 let sets = read_each(conn, operation, reads).await?;
                 within(operation, conn.execute("COMMIT", ())).await?;
                 Ok(sets)
@@ -259,7 +263,11 @@ impl<'a> Tx<'a> {
         self.begun = true;
         self.pending.clear();
         if !sql.is_empty() {
-            within(operation, conn.execute_batch(&sql)).await?;
+            within(
+                operation,
+                retry_lost_stream(conn, || conn.execute_batch(&sql)),
+            )
+            .await?;
         }
         if let Some((tables, condition, now_ms)) = judged {
             // Ceiling: guard reads run one after another, about 4 round trips
@@ -325,7 +333,9 @@ impl<'a> Tx<'a> {
             return Ok(());
         } else {
             tokio::time::timeout(REQUEST_TIMEOUT, async {
-                transactional_batch(conn, &self.pending).await.map(drop)
+                retry_lost_stream(conn, || transactional_batch(conn, &self.pending))
+                    .await
+                    .map(drop)
             })
             .await
         };
@@ -375,10 +385,13 @@ async fn read_rows(
     operation: &'static str,
     read: &Statement,
 ) -> Result<Vec<Row>> {
-    within(operation, async {
-        let mut rows = conn.query(read.sql(), read.params().to_vec()).await?;
-        drain(&mut rows).await
-    })
+    within(
+        operation,
+        retry_lost_stream(conn, || async move {
+            let mut rows = conn.query(read.sql(), read.params().to_vec()).await?;
+            drain(&mut rows).await
+        }),
+    )
     .await
 }
 

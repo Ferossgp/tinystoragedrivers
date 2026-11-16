@@ -78,3 +78,18 @@ fn transport(error: &libsql::Error) -> bool {
         _ => false,
     }
 }
+
+/// Whether the server refused a request because it no longer knows the
+/// stream the request named, so it ran nothing: Turso answers `404 stream not
+/// found`, sqld `400 Received an invalid baton` for a closed stream and
+/// `STREAM_EXPIRED` for an expired one.
+pub(crate) fn stream_lost(error: &libsql::Error) -> bool {
+    let libsql::Error::Hrana(inner) = error else {
+        return false;
+    };
+    let message = inner.to_string();
+    message.starts_with("api error: `status=4")
+        && ["stream not found", "invalid baton", "STREAM_EXPIRED"]
+            .iter()
+            .any(|reason| message.contains(reason))
+}
