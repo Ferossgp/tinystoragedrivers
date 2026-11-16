@@ -145,15 +145,14 @@ pub async fn query(
         [read] => Ok(vec![read_rows(conn, operation, read).await?]),
         _ => {
             let sets = async {
-                within(conn, operation, conn.execute("BEGIN", ())).await?;
+                within(operation, conn.execute("BEGIN", ())).await?;
                 let sets = read_each(conn, operation, reads).await?;
-                within(conn, operation, conn.execute("COMMIT", ())).await?;
+                within(operation, conn.execute("COMMIT", ())).await?;
                 Ok(sets)
             }
             .await;
-            if sets.is_err() && !conn.is_autocommit() && conn.execute("ROLLBACK", ()).await.is_err()
-            {
-                conn.reset().await;
+            if sets.is_err() {
+                super::recover(conn).await;
             }
             sets
         }
@@ -242,7 +241,7 @@ impl<'a> Tx<'a> {
         self.begun = true;
         self.pending.clear();
         if !sql.is_empty() {
-            within(conn, operation, conn.execute_batch(&sql)).await?;
+            within(operation, conn.execute_batch(&sql)).await?;
         }
         if let Some((tables, condition, now_ms)) = judged {
             // Ceiling: guard reads run one after another, about 4 round trips
@@ -278,11 +277,8 @@ impl<'a> Tx<'a> {
             Ok(value) => self.commit().await.map(|()| value),
             Err(error) => Err(error),
         };
-        if outcome.is_err()
-            && !self.conn.is_autocommit()
-            && self.conn.execute("ROLLBACK", ()).await.is_err()
-        {
-            self.conn.reset().await;
+        if outcome.is_err() {
+            super::recover(self.conn).await;
         }
         outcome
     }
@@ -315,10 +311,7 @@ impl<'a> Tx<'a> {
         match sent {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(commit_failed(operation, error)),
-            Err(_) => {
-                conn.reset().await;
-                Err(unknown_outcome(operation))
-            }
+            Err(_) => Err(unknown_outcome(operation)),
         }
     }
 }
@@ -330,15 +323,12 @@ fn push(sql: &mut String, statement: &Statement) -> libsql::Result<()> {
     Ok(())
 }
 
-/// Run one request under [`REQUEST_TIMEOUT`]; a request that does not answer
-/// abandons the connection's server stream.
+/// Run one request under [`REQUEST_TIMEOUT`].
 async fn within<T>(
-    conn: &Connection,
     operation: &'static str,
     request: impl Future<Output = libsql::Result<T>>,
 ) -> Result<T> {
     let Ok(result) = tokio::time::timeout(REQUEST_TIMEOUT, request).await else {
-        conn.reset().await;
         return Err(StorageError::unavailable(format!(
             "libsql did not answer during {operation}"
         )));
@@ -359,7 +349,7 @@ async fn read_each(
 }
 
 async fn read_rows(conn: &Connection, operation: &'static str, read: &Statement) -> Result<Vec<Row>> {
-    within(conn, operation, async {
+    within(operation, async {
         let mut rows = conn.query(read.sql(), read.params().to_vec()).await?;
         drain(&mut rows).await
     })

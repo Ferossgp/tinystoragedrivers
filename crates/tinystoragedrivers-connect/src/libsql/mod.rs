@@ -72,6 +72,28 @@ fn is_remote(url: &str) -> bool {
         .any(|scheme| url.starts_with(scheme))
 }
 
+/// Put `conn` back outside any transaction, on a fresh server stream.
+///
+/// Call it before each use of a connection that a failed or cancelled
+/// caller may have left behind. libSQL 0.10 keeps a remote stream's baton
+/// when a request fails or its answer never arrives, and sends every later
+/// request with it. Once the server has moved on (it applied the lost
+/// request, or dropped the stream), each of those requests fails with
+/// "stream not found" until the stream is reset. libSQL also keeps the
+/// transaction state of the last answered request, so it can report an open
+/// transaction that is gone.
+///
+/// An open transaction is rolled back first; a rollback that fails or stalls
+/// leaves it to the server, which rolls back a stream it no longer hears
+/// from. The reset itself is local: it forgets the baton, sends nothing, and
+/// does nothing on a local file.
+pub async fn recover(conn: &libsql::Connection) {
+    if !conn.is_autocommit() {
+        let _ = tokio::time::timeout(BUSY_TIMEOUT, conn.execute("ROLLBACK", ())).await;
+    }
+    conn.reset().await;
+}
+
 /// One libSQL connection shared by every primitive engine of a database.
 ///
 /// Statements of all clones run one at a time, in order, because a
@@ -141,21 +163,13 @@ impl LibsqlConnection {
         })
     }
 
-    /// Exclusive use of the connection, outside any transaction, until the
-    /// guard drops. Hold it only while statements run. A caller cancelled
-    /// inside a [`Tx`] leaves its transaction open; the next caller rolls it
-    /// back first (a connection that cannot roll back drops its server
-    /// stream, which the server rolls back).
+    /// Exclusive use of the connection, outside any transaction and on a
+    /// fresh server stream, until the guard drops. Hold it only while
+    /// statements run. A caller that failed or was cancelled leaves nothing
+    /// behind for the next one (see [`recover`]).
     pub async fn lock(&self) -> tokio::sync::MutexGuard<'_, libsql::Connection> {
         let conn = self.inner.conn.lock().await;
-        if !conn.is_autocommit() {
-            let rolled_back = tokio::time::timeout(BUSY_TIMEOUT, conn.execute("ROLLBACK", ()))
-                .await
-                .is_ok_and(|result| result.is_ok());
-            if !rolled_back {
-                conn.reset().await;
-            }
-        }
+        recover(&conn).await;
         conn
     }
 
