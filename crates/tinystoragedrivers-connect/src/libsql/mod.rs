@@ -74,10 +74,10 @@ fn is_remote(url: &str) -> bool {
 
 /// Put `conn` back outside any transaction, on a fresh server stream.
 ///
-/// Call it before each use of a connection that a failed or cancelled
-/// caller may have left behind. libSQL 0.10 keeps a remote stream's baton
-/// when a request fails or its answer never arrives, and sends every later
-/// request with it. Once the server has moved on (it applied the lost
+/// Call it after a failed request and before reusing a connection that a
+/// cancelled caller may have left behind. libSQL 0.10 keeps a remote stream's
+/// baton when a request fails or its answer never arrives, and sends every
+/// later request with it. Once the server has moved on (it applied the lost
 /// request, or dropped the stream), each of those requests fails with
 /// "stream not found" until the stream is reset. libSQL also keeps the
 /// transaction state of the last answered request, so it can report an open
@@ -86,7 +86,9 @@ fn is_remote(url: &str) -> bool {
 /// An open transaction is rolled back first; a rollback that fails or stalls
 /// leaves it to the server, which rolls back a stream it no longer hears
 /// from. The reset itself is local: it forgets the baton, sends nothing, and
-/// does nothing on a local file.
+/// does nothing on a local file. Never reset a healthy connection: a read
+/// leaves its stream open for the next request to reuse and close, and a
+/// forgotten stream holds a server connection until it expires.
 pub async fn recover(conn: &libsql::Connection) {
     if !conn.is_autocommit() {
         let _ = tokio::time::timeout(BUSY_TIMEOUT, conn.execute("ROLLBACK", ())).await;
@@ -163,13 +165,16 @@ impl LibsqlConnection {
         })
     }
 
-    /// Exclusive use of the connection, outside any transaction and on a
-    /// fresh server stream, until the guard drops. Hold it only while
-    /// statements run. A caller that failed or was cancelled leaves nothing
-    /// behind for the next one (see [`recover`]).
+    /// Exclusive use of the connection, outside any transaction, until the
+    /// guard drops. Hold it only while statements run. A caller cancelled
+    /// inside a [`Tx`] leaves its transaction open; the next caller recovers
+    /// the connection first (see [`recover`]). A failed request recovers in
+    /// [`query`] and [`Tx::finish`].
     pub async fn lock(&self) -> tokio::sync::MutexGuard<'_, libsql::Connection> {
         let conn = self.inner.conn.lock().await;
-        recover(&conn).await;
+        if !conn.is_autocommit() {
+            recover(&conn).await;
+        }
         conn
     }
 

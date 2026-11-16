@@ -140,23 +140,25 @@ pub async fn query(
     operation: &'static str,
     reads: &[Statement],
 ) -> Result<Vec<Vec<Row>>> {
-    match reads {
-        [] => Ok(Vec::new()),
-        [read] => Ok(vec![read_rows(conn, operation, read).await?]),
+    let sets = match reads {
+        [] => return Ok(Vec::new()),
+        [read] => read_rows(conn, operation, read)
+            .await
+            .map(|rows| vec![rows]),
         _ => {
-            let sets = async {
+            async {
                 within(operation, conn.execute("BEGIN", ())).await?;
                 let sets = read_each(conn, operation, reads).await?;
                 within(operation, conn.execute("COMMIT", ())).await?;
                 Ok(sets)
             }
-            .await;
-            if sets.is_err() {
-                super::recover(conn).await;
-            }
-            sets
+            .await
         }
+    };
+    if sets.is_err() {
+        super::recover(conn).await;
     }
+    sets
 }
 
 /// One write transaction on a locked connection.
