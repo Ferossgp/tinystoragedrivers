@@ -93,7 +93,9 @@ impl tower_service::Service<http::Uri> for Connector {
             }
             let name = rustls::pki_types::ServerName::try_from(host)
                 .map_err(|_| invalid("libsql transport host is not a valid server name"))?;
-            Ok(Stream::new(Io::Tls(Box::new(tls.connect(name, tcp).await?))))
+            Ok(Stream::new(Io::Tls(Box::new(
+                tls.connect(name, tcp).await?,
+            ))))
         })
     }
 }

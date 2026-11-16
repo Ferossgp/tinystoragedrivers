@@ -250,7 +250,11 @@ impl<'a> Tx<'a> {
             // Turso's 5 s transaction limit; batch the guard reads if agentd
             // moves away from the database region.
             let guards = condition_reads(tables, condition).map_err(during(operation))?;
-            judge(condition, read_each(conn, operation, &guards).await?, now_ms)?;
+            judge(
+                condition,
+                read_each(conn, operation, &guards).await?,
+                now_ms,
+            )?;
         }
         read_each(conn, operation, reads).await
     }
@@ -348,7 +352,11 @@ async fn read_each(
     Ok(sets)
 }
 
-async fn read_rows(conn: &Connection, operation: &'static str, read: &Statement) -> Result<Vec<Row>> {
+async fn read_rows(
+    conn: &Connection,
+    operation: &'static str,
+    read: &Statement,
+) -> Result<Vec<Row>> {
     within(operation, async {
         let mut rows = conn.query(read.sql(), read.params().to_vec()).await?;
         drain(&mut rows).await
